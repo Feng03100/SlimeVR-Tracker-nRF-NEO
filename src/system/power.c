@@ -125,7 +125,7 @@ static void sys_disconnect_interface_pins(void)
 	LOG_INF("Disconnected IMU CS GPIO");
 #endif
 #if DT_SPI_DEV_HAS_CS_GPIOS(DT_NODELABEL(mag_spi))
-	uint32_t mag_cs_gpios = DT_SPI_DEV_CS_GPIOS_PIN(DT_NODELABEL(mag_spi)));
+	uint32_t mag_cs_gpios = DT_SPI_DEV_CS_GPIOS_PIN(DT_NODELABEL(mag_spi));
 	LOG_INF("Magnetometer CS GPIO pin: %u", mag_cs_gpios);
 	nrf_gpio_cfg_default(mag_cs_gpios);
 	LOG_INF("Disconnected Magnetometer CS GPIO");

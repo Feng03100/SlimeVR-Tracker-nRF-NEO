@@ -1,0 +1,8 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+board:
+  name: ecan_ecbt_uf2
+  vendor: ecan
+  socs:
+    - name: nrf52840

@@ -105,9 +105,13 @@
 #define SENSOR_QUATERNION_CORRECTION 0.0f, 0.70710678f, 0.70710678f, 0.0f
 #endif
 
-#if defined(CONFIG_BOARD_FOXSNACKLITEV2_UF2)
+#if defined(CONFIG_BOARD_FOXSNACKLITEV2_UF2) || defined(CONFIG_BOARD_ECAN_ECBT_UF2)
 #undef SENSOR_QUATERNION_CORRECTION
 #define SENSOR_QUATERNION_CORRECTION 0.0f, 0.7071f, 0.7071f, 0.0f
+#endif
+
+#if defined(CONFIG_BOARD_ECAN_ECBT_UF2)
+#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT -mx, my, mz
 #endif
 
 // default orientation for most boards with the sensor mounted flat on the PCB
