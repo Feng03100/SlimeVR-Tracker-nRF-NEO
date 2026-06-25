@@ -48,11 +48,15 @@ void sensor_calibration_clear_mag(float m_inv[][3], bool write); // "request" ma
 void sensor_request_calibration(void);
 void sensor_request_calibration_6_side(void);
 void sensor_request_calibration_mag(void);
+// Initialise sensor-adaptive calibration parameters (min samples, averaging
+// target, etc.) from the detected magnetometer's noise characteristics.
+// Must be called once after the magnetometer is identified at scan time.
+void sensor_calibration_init_noise_params(void);
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions);
 #endif
 void sensor_calibration_online_mag_sample(const float m[3]);
-int sensor_calibration_online_mag_status(float *dir_bias);
+int sensor_calibration_online_mag_status(void);
 void sensor_calibration_track_mag_norm(float cal_norm);
 float sensor_calibration_get_mag_quality(void);
 void sensor_calibration_online_mag_retained_save(void);

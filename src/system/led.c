@@ -79,6 +79,8 @@ static const struct pwm_dt_spec pwm_led2 = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led2));
 static enum sys_led_pattern current_led_pattern;
 static int current_priority;
 
+float mag_cal_coverage = 0.0f;
+
 #if LED_EXISTS || LED_STRIP_EXISTS
 static enum sys_led_pattern led_patterns[SYS_LED_PATTERN_DEPTH]
 	= {[0 ...(SYS_LED_PATTERN_DEPTH - 1)] = SYS_LED_PATTERN_OFF};
@@ -278,6 +280,43 @@ static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value
 	gpio_pin_set_dt(&led, value_pptt > 5000);
 #endif
 }
+
+// Set LED color based on calibration coverage (0.0 = red, 1.0 = green)
+static void led_pin_set_coverage(float cov)
+{
+	if (cov < 0.0f) cov = 0.0f;
+	if (cov > 1.0f) cov = 1.0f;
+
+	// Red→Green gradient: r decreases, g increases with coverage
+	int r = (int)((1.0f - cov) * 10000);
+	int g = (int)(cov * 10000);
+	// Ensure minimum visibility at low coverage
+	if (r < 1500 && g < 1500) { r = 1500; g = 1500; }
+
+#if LED_STRIP_EXISTS
+	static struct led_rgb pixel[1];
+	pixel[0].r = 255 * r / 10000;
+	pixel[0].g = 255 * g / 10000;
+	pixel[0].b = 0;
+	led_strip_update_rgb(strip, pixel, 1);
+#elif defined(LED_RGB_COLOR) || defined(LED_TRI_COLOR)
+	pwm_set_pulse_dt(&pwm_led, pwm_led.period / 10000 * r);
+	pwm_set_pulse_dt(&pwm_led1, pwm_led1.period / 10000 * g);
+	pwm_set_pulse_dt(&pwm_led2, pwm_led2.period / 10000 * 0);
+#elif defined(LED_RG_COLOR) || defined(LED_DUAL_COLOR)
+	pwm_set_pulse_dt(&pwm_led, pwm_led.period / 10000 * r);
+	pwm_set_pulse_dt(&pwm_led1, pwm_led1.period / 10000 * g);
+#elif PWM_LED_EXISTS
+	// Single PWM channel: pick color from enum based on coverage threshold
+	enum sys_led_color color = (cov >= 0.66f) ? SYS_LED_COLOR_SUCCESS :
+	                           (cov >= 0.33f) ? SYS_LED_COLOR_CHARGING :
+	                                            SYS_LED_COLOR_ERROR;
+	led_pin_set(color, 10000, 6000);
+#else
+	// GPIO only: steady on (cannot show gradient)
+	gpio_pin_set_dt(&led, 1);
+#endif
+}
 #endif
 
 void set_led(enum sys_led_pattern led_pattern, int priority)
@@ -460,6 +499,11 @@ static void led_thread(void)
 			led_pattern_state = (led_pattern_state + 1) % 2;
 			led_pin_set(SYS_LED_COLOR_ERROR, 10000, led_pattern_state * 10000);
 			k_msleep(500);
+			break;
+
+		case SYS_LED_PATTERN_CAL_PROGRESS:
+			led_pin_set_coverage(mag_cal_coverage);
+			k_msleep(200);
 			break;
 
 		default:

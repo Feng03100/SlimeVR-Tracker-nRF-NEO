@@ -52,6 +52,7 @@ enum sys_led_pattern {
 	SYS_LED_PATTERN_PULSE_PERSIST,  // 5000ms pulsing								// Charging| indicates charging
 	SYS_LED_PATTERN_ACTIVE_PERSIST, // 300ms on 9700ms off							// Default | indicates normal
 									// operation
+	SYS_LED_PATTERN_CAL_PROGRESS,   // Color gradient (red→amber→green) based on calibration coverage
 
 	SYS_LED_PATTERN_ERROR_A, // 500ms on 500ms off, 2 times, every 5000ms			// Error
 	SYS_LED_PATTERN_ERROR_B, // 500ms on 500ms off, 3 times, every 5000ms			// Error
@@ -68,5 +69,7 @@ enum sys_led_color {
 };
 
 void set_led(enum sys_led_pattern led_pattern, int priority);
+
+extern float mag_cal_coverage;
 
 #endif

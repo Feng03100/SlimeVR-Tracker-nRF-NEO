@@ -48,6 +48,7 @@ void sensor_set_mag_enabled(bool enabled);
 bool sensor_get_mag_enabled(void);
 bool sensor_get_mag_available(void);
 bool sensor_get_mag_calibrated(void);
+float sensor_get_mag_cal_noise_mg(void);
 void sensor_refresh_sensor_ids(void);
 void sensor_mag_ref_reset(void);
 
@@ -145,6 +146,7 @@ typedef struct sensor_mag {
 	void (*mag_process)(uint8_t*, float[3]); // use if magnetometer is present as an auxiliary sensor, from data read by IMU
 	uint8_t ext_min_burst; // minimum external-interface read transaction length
 	uint8_t ext_burst; // preferred full burst length
+	float cal_noise_mg; // typical noise density (mGauss) for calibration adaptation; 0 = use defaults
 } sensor_mag_t;
 
 #endif

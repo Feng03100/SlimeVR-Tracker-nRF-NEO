@@ -43,6 +43,7 @@
 #include "mag/LIS2MDL.h"
 #include "mag/LIS3MDL.h"
 #include "mag/MMC5983MA.h"
+#include "mag/QMC5883L.h"
 #include "mag/QMC6309.h"
 
 #include "scan.h"
@@ -141,7 +142,7 @@ const char *dev_mag_names[] = {
 };
 const sensor_mag_t *sensor_mags[] = {
 	&sensor_mag_none, // HMC5883 will not implement, too low quality
-	&sensor_mag_none, // QMC5883 not implemented
+	&sensor_mag_qmc5883l, // QMC5883L
 	&sensor_mag_qmc6309,
 	&sensor_mag_none, // QMC6310
 	&sensor_mag_none, // AK8963

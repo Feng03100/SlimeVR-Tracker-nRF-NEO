@@ -209,12 +209,11 @@ static void print_sensor(void)
 		bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
 		                 || retained->magBAinv[0][1] != 0.0f
 		                 || retained->magBAinv[0][2] != 0.0f);
-		float dir_bias = 0;
-		int online_samples = sensor_calibration_online_mag_status(&dir_bias);
+		int online_samples = sensor_calibration_online_mag_status();
 		float mag_cv = sensor_calibration_get_mag_quality();
-		printk("Mag cal: %s | norm_cv=%.3f | Online: %d samples, dir_bias=%.2f\n",
+		printk("Mag cal: %s | norm_cv=%.3f | Online: %d samples\n",
 		       mag_has_cal ? "active" : "none",
-		       (double)mag_cv, online_samples, (double)dir_bias);
+		       (double)mag_cv, online_samples);
 	}
 
 	printk("\nFusion: %s\n", sensor_get_sensor_fusion_name());
@@ -1155,16 +1154,14 @@ static void console_thread(void)
 						(double)retained->magBAinv[2][i],
 						(double)retained->magBAinv[3][i]);
 				}
-				float dir_bias = 0;
-				int online_samples = sensor_calibration_online_mag_status(&dir_bias);
-				bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
-				                 || retained->magBAinv[0][1] != 0.0f
-				                 || retained->magBAinv[0][2] != 0.0f);
-				float mag_cv = sensor_calibration_get_mag_quality();
-				printk("Calibration: %s (norm_cv=%.3f)\n",
-				       mag_has_cal ? "active" : "none", (double)mag_cv);
-				printk("Online: %d samples, dir_bias=%.2f\n",
-				       online_samples, (double)dir_bias);
+			int online_samples = sensor_calibration_online_mag_status();
+			bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
+			                 || retained->magBAinv[0][1] != 0.0f
+			                 || retained->magBAinv[0][2] != 0.0f);
+			float mag_cv = sensor_calibration_get_mag_quality();
+			printk("Calibration: %s (norm_cv=%.3f)\n",
+			       mag_has_cal ? "active" : "none", (double)mag_cv);
+			printk("Online: %d samples\n", online_samples);
 			} else {
 				char *subcmd = strtok((char *)arg, " ");
 				if (strcmp(subcmd, "on") == 0) {

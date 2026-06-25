@@ -6,3 +6,5 @@ board:
   vendor: ecan
   socs:
     - name: nrf52840
+      variants:
+      - name: 'mag_i2c'

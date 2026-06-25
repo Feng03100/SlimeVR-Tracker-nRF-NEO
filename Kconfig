@@ -434,6 +434,15 @@ config SENSOR_USE_BOOT_CALIBRATION
 
 endmenu
 
+config SENSOR_ONLINE_MAG_CAL
+    bool "Enable online (background) magnetometer calibration"
+    default y
+    help
+        Enable background/online magnetometer calibration that continuously
+        refines the hard/soft-iron fit during normal operation.
+        When disabled, only the manual 'mag cal' / 'calibrate' command is
+        available; the online accumulator and background checks are inert.
+
 config RADIO_TX_POWER
     int "Radio output power (dBm)"
     default 8
