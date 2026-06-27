@@ -120,6 +120,9 @@ static float dir_max[3];
 // which would exceed the ~6ms FIFO budget if run at the 50Hz mag rate.
 // Percentiles change slowly, so periodic recompute is safe.
 #define MAG_CENTER_RECOMPUTE_INTERVAL 16
+// Online pre-filter: reject samples outside cached P10/P90 band before they
+// enter the center estimator or calibration accumulators.
+#define MAG_CENTER_PREFILTER_MARGIN 0.2f
 typedef struct {
 	float buf[3][MAG_CENTER_BUF_SIZE];
 	int count[3];
@@ -629,6 +632,7 @@ static float magneto_online_min_dir_change_threshold(void);
 static float magneto_directional_bias(const float ds[3], double count);
 static void magneto_center_reset(mag_center_estimator_t *estimator);
 static void magneto_center_update(mag_center_estimator_t *estimator, const float m[3]);
+static bool magneto_center_prefilter_pass(const mag_center_estimator_t *estimator, const float m[3]);
 static void magneto_center_get(const mag_center_estimator_t *estimator, float center[3]);
 static float magneto_center_min_range(const mag_center_estimator_t *estimator);
 static bool magneto_center_has_coverage(const mag_center_estimator_t *estimator);
@@ -2095,6 +2099,22 @@ static void magneto_center_reset(mag_center_estimator_t *estimator)
 	memset(estimator, 0, sizeof(*estimator));
 }
 
+static bool magneto_center_prefilter_pass(const mag_center_estimator_t *estimator, const float m[3])
+{
+	if (!estimator->initialized || !estimator->cache_valid) {
+		return true;
+	}
+
+	for (int i = 0; i < 3; i++) {
+		float lo = estimator->cached_p10[i] - MAG_CENTER_PREFILTER_MARGIN;
+		float hi = estimator->cached_p90[i] + MAG_CENTER_PREFILTER_MARGIN;
+		if (m[i] < lo || m[i] > hi) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static void magneto_center_update(mag_center_estimator_t *estimator, const float m[3])
 {
 	if (!estimator->initialized) {
@@ -2932,6 +2952,9 @@ static void sensor_sample_mag_magneto_sample(const float m[3])
 	if (magneto_norm_sq(raw_mag) < 1e-8f) {
 		return;
 	}
+	if (!magneto_center_prefilter_pass(&manual_center_estimator, raw_mag)) {
+		return;
+	}
 	magneto_center_update(&manual_center_estimator, raw_mag);
 	if (!magneto_centered_direction(&manual_center_estimator, raw_mag, cur_mag_dir)) {
 		return;
@@ -3127,6 +3150,9 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	float raw_mag[3] = {m[0], m[1], m[2]};
 	float cur_dir[3];
 	if (magneto_norm_sq(raw_mag) < 1e-8f) {
+		return;
+	}
+	if (!magneto_center_prefilter_pass(&online_center_estimator, raw_mag)) {
 		return;
 	}
 	magneto_center_update(&online_center_estimator, raw_mag);
