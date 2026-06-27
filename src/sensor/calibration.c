@@ -73,11 +73,10 @@ static uint16_t sens_cal_revolutions;
 #define CALIBRATION_SENSOR_INIT_POLL_MS 10
 
 // Minimum samples before attempting trial calibration.
-// Two separate thresholds: the manual path accumulates an unbounded lifetime
-// sample_count and needs a large value for a stable first fit; the online path
-// is bounded by the 8x16=128 quadrant ring buffer and uses a smaller value
-// (half-fill) so a trial fit becomes possible as the buffer fills.
-#define MAG_CAL_MIN_SAMPLES 600          // manual calibration
+// Manual threshold comes from CONFIG_SENSOR_MAG_CAL_MIN_SAMPLES (default 128,
+// overridable per board). The online path is bounded by the 8x16=128 quadrant
+// ring buffer and uses a smaller value (half-fill) so a trial fit becomes
+// possible as the buffer fills.
 #define ONLINE_MAG_CAL_MIN_SAMPLES 64    // online (background) calibration
 // Attempt trial calibration every this many new samples (manual cal)
 #define MAG_CAL_TRIAL_INTERVAL 80
@@ -88,7 +87,7 @@ static uint16_t sens_cal_revolutions;
 // The online path uses the compile-time ONLINE_MAG_CAL_MIN_SAMPLES directly
 // because its EMA blending mechanism already suppresses noise influence, and
 // its sample count is bounded by the quadrant ring buffer (max 128).
-static int mag_cal_min_samples = MAG_CAL_MIN_SAMPLES;
+static int mag_cal_min_samples = CONFIG_SENSOR_MAG_CAL_MIN_SAMPLES;
 static int mag_cal_trial_interval = MAG_CAL_TRIAL_INTERVAL;
 // Chunked-averaging target for manual calibration: N accepted samples are
 // averaged before feeding one point into the Magneto LS accumulator. This
@@ -1881,7 +1880,7 @@ static bool wait_for_motion(bool motion, int samples)
 void sensor_calibration_init_noise_params(void)
 {
 	float noise_mg = sensor_get_mag_cal_noise_mg();
-	mag_cal_min_samples = MAG_CAL_MIN_SAMPLES;
+	mag_cal_min_samples = CONFIG_SENSOR_MAG_CAL_MIN_SAMPLES;
 	mag_cal_trial_interval = MAG_CAL_TRIAL_INTERVAL;
 
 	if (noise_mg <= 0.0f || noise_mg < 2.0f) {
