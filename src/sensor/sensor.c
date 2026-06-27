@@ -330,6 +330,13 @@ const char *sensor_get_sensor_mag_name(void)
 	return dev_mag_names[sensor_mag_id];
 }
 
+float sensor_get_mag_cal_noise_mg(void)
+{
+	if (sensor_mag_id < 0 || sensor_mag == NULL)
+		return 0.0f;  // 0 = use default calibration parameters
+	return sensor_mag->cal_noise_mg;
+}
+
 const char *sensor_get_sensor_fusion_name(void)
 {
 	if (fusion_id < 0)
@@ -588,6 +595,10 @@ int sensor_scan(void)
 	sensor_scan_write();
 	sensor_imu_id = imu_id;
 	sensor_mag_id = mag_id;
+
+	// Initialise sensor-adaptive calibration parameters from the detected
+	// magnetometer's noise characteristics. Must run after sensor_mag_id is set.
+	sensor_calibration_init_noise_params();
 
 	mag_enabled = retained->mag_enabled;
 	if (mag_enabled && !mag_available) {
@@ -1838,7 +1849,9 @@ void sensor_loop(void)
 				memcpy(uncalibrated_m, raw_m, sizeof(uncalibrated_m)); // copy raw magnetometer data
 
 				// Feed raw mag to background online calibration accumulator
+#if IS_ENABLED(CONFIG_SENSOR_ONLINE_MAG_CAL)
 				sensor_calibration_online_mag_sample(uncalibrated_m);
+#endif
 
 				sensor_calibration_process_mag(raw_m);
 				float zero_m[3] = {0};
@@ -1850,6 +1863,7 @@ void sensor_loop(void)
 					// Track calibrated mag norm for online quality assessment
 					// Only track when VQF reports no magnetic disturbance — including
 					// disturbed samples inflates norm CV and prevents online cal from stabilizing
+#if IS_ENABLED(CONFIG_SENSOR_ONLINE_MAG_CAL)
 #if CONFIG_SENSOR_USE_VQF
 					if (!vqf_get_mag_dist_detected()) {
 #endif
@@ -1857,6 +1871,7 @@ void sensor_loop(void)
 						sensor_calibration_track_mag_norm(sqrtf(cal_norm_sq));
 #if CONFIG_SENSOR_USE_VQF
 					}
+#endif
 #endif
 				}
 				// Save mag data for debug output

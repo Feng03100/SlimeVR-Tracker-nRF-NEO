@@ -434,6 +434,27 @@ config SENSOR_USE_BOOT_CALIBRATION
 
 endmenu
 
+config SENSOR_ONLINE_MAG_CAL
+    bool "Enable online (background) magnetometer calibration"
+    default y
+    help
+        Enable background/online magnetometer calibration that continuously
+        refines the hard/soft-iron fit during normal operation.
+        When disabled, only the manual 'mag cal' / 'calibrate' command is
+        available; the online accumulator and background checks are inert.
+
+config SENSOR_MAG_CAL_MIN_SAMPLES
+    int "Manual magnetometer calibration minimum sample count"
+    default 128
+    range 32 4096
+    help
+        Minimum number of accepted samples before manual magnetometer
+        calibration ('mag cal') can complete. Progress LED coverage uses
+        this value as the denominator.
+        Override per board in that board's *_defconfig (e.g.
+        CONFIG_SENSOR_MAG_CAL_MIN_SAMPLES=256) or in the board Kconfig
+        fragment with a board-specific default.
+
 config RADIO_TX_POWER
     int "Radio output power (dBm)"
     default 8

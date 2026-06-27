@@ -177,5 +177,6 @@ const sensor_mag_t sensor_mag_none = {
 	*mag_none_temp_read,
 
 	*mag_none_mag_process,
-	UINT8_MAX, UINT8_MAX
+	UINT8_MAX, UINT8_MAX,
+	0.0f
 };

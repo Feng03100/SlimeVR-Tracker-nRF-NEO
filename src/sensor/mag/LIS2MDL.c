@@ -177,5 +177,6 @@ const sensor_mag_t sensor_mag_lis2mdl = {
 	*lis2_temp_read,
 
 	*lis2_mag_process,
-	6, 6
+	6, 6,
+	1.5f
 };

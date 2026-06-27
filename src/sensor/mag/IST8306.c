@@ -162,5 +162,6 @@ const sensor_mag_t sensor_mag_ist8306 = {
 	*mag_none_temp_read,
 
 	*ist8306_mag_process,
-	6, 6
+	6, 6,
+	2.0f
 };

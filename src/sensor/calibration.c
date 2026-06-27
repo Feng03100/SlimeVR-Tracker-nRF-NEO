@@ -72,10 +72,34 @@ static uint16_t sens_cal_revolutions;
 #define CALIBRATION_SENSOR_INIT_WAIT_MS 10000
 #define CALIBRATION_SENSOR_INIT_POLL_MS 10
 
-// Minimum samples before attempting trial calibration
-#define MAG_CAL_MIN_SAMPLES 64
+// Minimum samples before attempting trial calibration.
+// Manual threshold comes from CONFIG_SENSOR_MAG_CAL_MIN_SAMPLES (default 128,
+// overridable per board). The online path is bounded by the 8x16=128 quadrant
+// ring buffer and uses a smaller value (half-fill) so a trial fit becomes
+// possible as the buffer fills.
+#define ONLINE_MAG_CAL_MIN_SAMPLES 64    // online (background) calibration
 // Attempt trial calibration every this many new samples (manual cal)
 #define MAG_CAL_TRIAL_INTERVAL 80
+
+// Sensor-adaptive calibration parameters (manual calibration only).
+// The runtime variables below are initialised from sensor_mag->cal_noise_mg
+// via sensor_calibration_init_noise_params() once the magnetometer is detected.
+// The online path uses the compile-time ONLINE_MAG_CAL_MIN_SAMPLES directly
+// because its EMA blending mechanism already suppresses noise influence, and
+// its sample count is bounded by the quadrant ring buffer (max 128).
+static int mag_cal_min_samples = CONFIG_SENSOR_MAG_CAL_MIN_SAMPLES;
+static int mag_cal_trial_interval = MAG_CAL_TRIAL_INTERVAL;
+// Chunked-averaging target for manual calibration: N accepted samples are
+// averaged before feeding one point into the Magneto LS accumulator. This
+// suppresses the n^2 bias that high-noise sensors inject into the ATA matrix.
+// 1 = no averaging (low-noise sensors).
+#define MAG_CAL_AVG_MAX 8
+static int mag_cal_avg_target = 1;
+// Chunked-averaging buffer for manual calibration (Fix 2).
+// Accepted samples are accumulated here; when mag_cal_avg_target samples
+// are collected, their mean is fed to magneto_sample() as one LS point.
+static float mag_cal_avg_buf[MAG_CAL_AVG_MAX][3];
+static int mag_cal_avg_count;
 
 static int64_t mag_cal_last_status_log;
 
@@ -85,12 +109,30 @@ static double sample_count;
 // Direction range tracking for manual calibration: per-axis min/max of normalized direction
 static float dir_min[3];
 static float dir_max[3];
-// Per-axis min/max center estimator used only for coverage decisions.
+// Per-axis percentile (P10/P90) center estimator used only for coverage decisions.
 // Magneto still receives raw samples so the hard/soft-iron fit is unchanged.
+// Percentile estimation is used instead of min/max to reject noise spikes that
+// would otherwise inflate the observed range and falsely signal coverage.
+#define MAG_CENTER_BUF_SIZE 128
+// Recompute cached percentiles every N updates instead of every sample.
+// Insertion sort of 128 elements x 3 axes takes ~3.75ms on Cortex-M4 @64MHz,
+// which would exceed the ~6ms FIFO budget if run at the 50Hz mag rate.
+// Percentiles change slowly, so periodic recompute is safe.
+#define MAG_CENTER_RECOMPUTE_INTERVAL 16
+// Online pre-filter: reject samples outside cached P10/P90 band before they
+// enter the center estimator or calibration accumulators.
+#define MAG_CENTER_PREFILTER_MARGIN 0.2f
 typedef struct {
-	float min[3];
-	float max[3];
+	float buf[3][MAG_CENTER_BUF_SIZE];
+	int count[3];
+	int head[3];
 	bool initialized;
+	// Cached P10/P90 per axis, recomputed periodically so that
+	// magneto_center_get / magneto_center_min_range are O(1) readers.
+	float cached_p10[3];
+	float cached_p90[3];
+	bool cache_valid;
+	int samples_since_recompute;
 } mag_center_estimator_t;
 
 static mag_center_estimator_t manual_center_estimator;
@@ -161,7 +203,7 @@ static float manual_last_accel_dir[3];
 // Background checks should not run on every calibration-thread pass.
 // Tie the minimum check spacing to roughly one fresh fit's worth of accepted
 // samples at the maximum online sampling rate.
-#define ONLINE_MIN_CHECK_INTERVAL_MS (MAG_CAL_MIN_SAMPLES * ONLINE_MIN_INTERVAL_MS * 2)
+#define ONLINE_MIN_CHECK_INTERVAL_MS (ONLINE_MAG_CAL_MIN_SAMPLES * ONLINE_MIN_INTERVAL_MS * 2)
 
 // Runtime calibrated norm tracking (exponential moving average)
 // Used to assess current calibration quality and decide if online update is needed
@@ -589,6 +631,7 @@ static float magneto_online_min_dir_change_threshold(void);
 static float magneto_directional_bias(const float ds[3], double count);
 static void magneto_center_reset(mag_center_estimator_t *estimator);
 static void magneto_center_update(mag_center_estimator_t *estimator, const float m[3]);
+static bool magneto_center_prefilter_pass(const mag_center_estimator_t *estimator, const float m[3]);
 static void magneto_center_get(const mag_center_estimator_t *estimator, float center[3]);
 static float magneto_center_min_range(const mag_center_estimator_t *estimator);
 static bool magneto_center_has_coverage(const mag_center_estimator_t *estimator);
@@ -996,6 +1039,8 @@ void sensor_request_calibration_mag(void)
 	magneto_reset();  // Clear ata buffer and sample count
 	magneto_online_reset();  // Clear online accumulator
 	magneto_progress |= 1 << 7;  // Set collection active flag
+	mag_cal_coverage = 0.0f;
+	set_led(SYS_LED_PATTERN_CAL_PROGRESS, SYS_LED_PRIORITY_SENSOR);
 	LOG_INF("Magnetometer calibration started (rotate tracker in all orientations)");
 }
 
@@ -1832,6 +1877,28 @@ static bool wait_for_motion(bool motion, int samples)
 	return false;
 }
 
+void sensor_calibration_init_noise_params(void)
+{
+	float noise_mg = sensor_get_mag_cal_noise_mg();
+	mag_cal_min_samples = CONFIG_SENSOR_MAG_CAL_MIN_SAMPLES;
+	mag_cal_trial_interval = MAG_CAL_TRIAL_INTERVAL;
+
+	if (noise_mg <= 0.0f || noise_mg < 2.0f) {
+		// Low-noise or unknown sensor: no chunked averaging
+		mag_cal_avg_target = 1;
+	} else {
+		// Chunked averaging: average N accepted samples before feeding one
+		// point into the Magneto LS accumulator to suppress n^2 bias.
+		if (noise_mg < 5.0f) {
+			mag_cal_avg_target = 4;
+		} else {
+			mag_cal_avg_target = MAG_CAL_AVG_MAX;  // 8
+		}
+	}
+	LOG_INF("Mag cal noise params: noise=%.1f mG, min_samples=%d, avg_target=%d",
+	        (double)noise_mg, mag_cal_min_samples, mag_cal_avg_target);
+}
+
 static void magneto_reset(void)
 {
 	magneto_progress = 0;
@@ -1847,6 +1914,8 @@ static void magneto_reset(void)
 	magneto_center_reset(&manual_center_estimator);
 	memset(manual_last_dir, 0, sizeof(manual_last_dir));
 	memset(manual_last_accel_dir, 0, sizeof(manual_last_accel_dir));
+	mag_cal_avg_count = 0;
+	memset(mag_cal_avg_buf, 0, sizeof(mag_cal_avg_buf));
 }
 
 static void magneto_online_reset(void)
@@ -1982,7 +2051,23 @@ static float magneto_online_min_dir_change_threshold(void)
 
 	if (!initialized) {
 		const float deg_to_rad = 0.01745329251994329577f;
-		threshold = 1.0f - cosf(ONLINE_MIN_DIR_CHANGE_DEG * deg_to_rad);
+		float base_deg = ONLINE_MIN_DIR_CHANGE_DEG;  // 10° default
+
+		// For high-noise sensors, increase the direction-change gate so that
+		// noise-induced direction jitter does not falsely pass the diversity
+		// check and inject redundant noisy samples into the LS fit.
+		// Direction noise ≈ sigma / |B_horizontal|; use 3-sigma to be safe.
+		// |B_horizontal| ≈ 200 mG at mid-latitudes (dip ~60-70°).
+		float noise_mg = sensor_get_mag_cal_noise_mg();
+		if (noise_mg > 2.0f) {
+			float dir_noise_deg = 3.0f * noise_mg / 200.0f * (180.0f / 3.14159265f);
+			if (dir_noise_deg > base_deg)
+				base_deg = dir_noise_deg;
+			if (base_deg > 25.0f)
+				base_deg = 25.0f;  // cap: avoid starving the sample collector
+		}
+
+		threshold = 1.0f - cosf(base_deg * deg_to_rad);
 		initialized = true;
 	}
 
@@ -2013,42 +2098,93 @@ static void magneto_center_reset(mag_center_estimator_t *estimator)
 	memset(estimator, 0, sizeof(*estimator));
 }
 
-static void magneto_center_update(mag_center_estimator_t *estimator, const float m[3])
+static bool magneto_center_prefilter_pass(const mag_center_estimator_t *estimator, const float m[3])
 {
-	if (!estimator->initialized) {
-		memcpy(estimator->min, m, sizeof(estimator->min));
-		memcpy(estimator->max, m, sizeof(estimator->max));
-		estimator->initialized = true;
-		return;
+	if (!estimator->initialized || !estimator->cache_valid) {
+		return true;
 	}
 
 	for (int i = 0; i < 3; i++) {
-		if (m[i] < estimator->min[i]) { estimator->min[i] = m[i]; }
-		if (m[i] > estimator->max[i]) { estimator->max[i] = m[i]; }
+		float lo = estimator->cached_p10[i] - MAG_CENTER_PREFILTER_MARGIN;
+		float hi = estimator->cached_p90[i] + MAG_CENTER_PREFILTER_MARGIN;
+		if (m[i] < lo || m[i] > hi) {
+			return false;
+		}
 	}
+	return true;
+}
+
+static void magneto_center_update(mag_center_estimator_t *estimator, const float m[3])
+{
+	if (!estimator->initialized) {
+		memset(estimator->count, 0, sizeof(estimator->count));
+		memset(estimator->head, 0, sizeof(estimator->head));
+		estimator->initialized = true;
+	}
+	for (int i = 0; i < 3; i++) {
+		estimator->buf[i][estimator->head[i]] = m[i];
+		estimator->head[i] = (estimator->head[i] + 1) % MAG_CENTER_BUF_SIZE;
+		if (estimator->count[i] < MAG_CENTER_BUF_SIZE)
+			estimator->count[i]++;
+	}
+
+	// Recompute cached P10/P90 periodically. Insertion sort of 128 elements
+	// x 3 axes is ~3.75ms on M4@64MHz — too slow for every 50Hz mag sample,
+	// but percentiles drift slowly so recompute every N samples is safe.
+	estimator->samples_since_recompute++;
+	bool need_recompute = !estimator->cache_valid
+		|| estimator->samples_since_recompute >= MAG_CENTER_RECOMPUTE_INTERVAL
+		|| estimator->count[0] < MAG_CENTER_RECOMPUTE_INTERVAL;  // bootstrap: every sample until buffer fills
+	if (!need_recompute)
+		return;
+
+	estimator->samples_since_recompute = 0;
+	static float sort_buf[3][MAG_CENTER_BUF_SIZE];
+	for (int i = 0; i < 3; i++) {
+		int n = estimator->count[i];
+		if (n <= 0) {
+			estimator->cached_p10[i] = 0.0f;
+			estimator->cached_p90[i] = 0.0f;
+			continue;
+		}
+		memcpy(sort_buf[i], estimator->buf[i], n * sizeof(float));
+		for (int a = 1; a < n; a++) {
+			float key = sort_buf[i][a];
+			int b = a - 1;
+			while (b >= 0 && sort_buf[i][b] > key) {
+				sort_buf[i][b + 1] = sort_buf[i][b];
+				b--;
+			}
+			sort_buf[i][b + 1] = key;
+		}
+		int idx10 = (int)(0.10f * (n - 1));
+		int idx90 = (int)(0.90f * (n - 1));
+		estimator->cached_p10[i] = sort_buf[i][idx10];
+		estimator->cached_p90[i] = sort_buf[i][idx90];
+	}
+	estimator->cache_valid = true;
 }
 
 static void magneto_center_get(const mag_center_estimator_t *estimator, float center[3])
 {
-	if (!estimator->initialized) {
+	if (!estimator->initialized || !estimator->cache_valid) {
 		memset(center, 0, sizeof(float) * 3);
 		return;
 	}
-
 	for (int i = 0; i < 3; i++) {
-		center[i] = (estimator->min[i] + estimator->max[i]) * 0.5f;
+		center[i] = (estimator->cached_p10[i] + estimator->cached_p90[i]) * 0.5f;
 	}
 }
 
 static float magneto_center_min_range(const mag_center_estimator_t *estimator)
 {
-	if (!estimator->initialized) {
+	if (!estimator->initialized || !estimator->cache_valid) {
 		return 0.0f;
 	}
-
-	float min_range = estimator->max[0] - estimator->min[0];
-	for (int i = 1; i < 3; i++) {
-		float range = estimator->max[i] - estimator->min[i];
+	float min_range = 1e30f;
+	for (int i = 0; i < 3; i++) {
+		// P10-P90 spans ~80% of the true range; scale up to estimate full range.
+		float range = (estimator->cached_p90[i] - estimator->cached_p10[i]) * 1.25f;
 		if (range < min_range) {
 			min_range = range;
 		}
@@ -2172,9 +2308,9 @@ static float magneto_min_dir_range(void)
  * Returns true if quality is acceptable.
  */
 static bool magneto_quality_check(double *ata_buf, double norm_sum_val, double sample_count_val,
-                                  float m_inv_out[][3])
+                                  int min_samples, float m_inv_out[][3])
 {
-	if (sample_count_val < MAG_CAL_MIN_SAMPLES) {
+	if (sample_count_val < min_samples) {
 		return false;
 	}
 
@@ -2815,6 +2951,9 @@ static void sensor_sample_mag_magneto_sample(const float m[3])
 	if (magneto_norm_sq(raw_mag) < 1e-8f) {
 		return;
 	}
+	if (!magneto_center_prefilter_pass(&manual_center_estimator, raw_mag)) {
+		return;
+	}
 	magneto_center_update(&manual_center_estimator, raw_mag);
 	if (!magneto_centered_direction(&manual_center_estimator, raw_mag, cur_mag_dir)) {
 		return;
@@ -2863,15 +3002,52 @@ static void sensor_sample_mag_magneto_sample(const float m[3])
 		manual_last_accel_dir[2] = cur_accel_dir[2];
 	}
 
-	// Accept sample - add to Magneto accumulator
-	magneto_sample(m[0], m[1], m[2], ata, &norm_sum, &sample_count); // 400us
+	// Accept sample — accumulate into chunked-averaging buffer (Fix 2).
+	// Direction gate and center estimator still use the individual sample
+	// (above) so diversity tracking stays sensitive. Only the LS feed is
+	// averaged to suppress the n^2 noise bias in the ATA matrix.
+	mag_cal_avg_buf[mag_cal_avg_count][0] = m[0];
+	mag_cal_avg_buf[mag_cal_avg_count][1] = m[1];
+	mag_cal_avg_buf[mag_cal_avg_count][2] = m[2];
+	mag_cal_avg_count++;
+
+	if (mag_cal_avg_count < mag_cal_avg_target) {
+		return;  // buffer not full yet, keep accumulating
+	}
+
+	// Buffer full: compute mean and feed one averaged point to Magneto LS
+	float avg[3] = {0, 0, 0};
+	for (int i = 0; i < mag_cal_avg_count; i++) {
+		avg[0] += mag_cal_avg_buf[i][0];
+		avg[1] += mag_cal_avg_buf[i][1];
+		avg[2] += mag_cal_avg_buf[i][2];
+	}
+	float inv = 1.0f / (float)mag_cal_avg_count;
+	avg[0] *= inv; avg[1] *= inv; avg[2] *= inv;
+	mag_cal_avg_count = 0;  // reset buffer
+
+	magneto_sample(avg[0], avg[1], avg[2], ata, &norm_sum, &sample_count); // 400us
 	float coverage_mag[3];
 	magneto_coverage_sample(&manual_center_estimator, raw_mag, coverage_mag);
 	magneto_update_dir_range(coverage_mag);
 
-	// Attempt trial calibration every MAG_CAL_TRIAL_INTERVAL samples
-	if (sample_count >= MAG_CAL_MIN_SAMPLES &&
-	    (int)sample_count % MAG_CAL_TRIAL_INTERVAL < 1) {
+	// Update LED coverage indicator for color gradient feedback
+	{
+		float dir_range = magneto_min_dir_range();
+		float raw_range = magneto_center_min_range(&manual_center_estimator);
+		float dir_cov = dir_range / MAG_CAL_MIN_DIR_RANGE;
+		float raw_cov = raw_range / MAG_CAL_MIN_RAW_AXIS_RANGE;
+		float range_cov = (dir_cov < raw_cov) ? dir_cov : raw_cov;
+		float sample_cov = (float)sample_count / (float)mag_cal_min_samples;
+		float cov = (range_cov < sample_cov) ? range_cov : sample_cov;
+		if (cov > 1.0f) cov = 1.0f;
+		if (cov < 0.0f) cov = 0.0f;
+		mag_cal_coverage = cov;
+	}
+
+	// Attempt trial calibration every mag_cal_trial_interval samples
+	if (sample_count >= mag_cal_min_samples &&
+	    (int)sample_count % mag_cal_trial_interval < 1) {
 		float min_range = magneto_min_dir_range();
 		float raw_range = magneto_center_min_range(&manual_center_estimator);
 		LOG_INF("Mag cal check: %d samples, min_range=%.2f (need %.2f), raw_range=%.3f (need %.3f)",
@@ -2881,11 +3057,10 @@ static void sensor_sample_mag_magneto_sample(const float m[3])
 		// Require minimum directional coverage before attempting calibration
 		if (min_range < MAG_CAL_MIN_DIR_RANGE || raw_range < MAG_CAL_MIN_RAW_AXIS_RANGE) {
 			LOG_INF("Mag cal: need more rotation, keep turning");
-			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
 			return;
 		}
 
-		if (magneto_quality_check(ata, norm_sum, sample_count, NULL)) {
+		if (magneto_quality_check(ata, norm_sum, sample_count, mag_cal_min_samples, NULL)) {
 			magneto_progress |= 0b01111111;
 			LOG_INF("Mag cal ready: %d samples, min_range=%.2f",
 			        (int)sample_count, (double)min_range);
@@ -2893,7 +3068,6 @@ static void sensor_sample_mag_magneto_sample(const float m[3])
 		} else {
 			LOG_INF("Mag cal: not ready yet, keep rotating (%d samples)",
 			        (int)sample_count);
-			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
 		}
 	}
 }
@@ -2977,6 +3151,9 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	if (magneto_norm_sq(raw_mag) < 1e-8f) {
 		return;
 	}
+	if (!magneto_center_prefilter_pass(&online_center_estimator, raw_mag)) {
+		return;
+	}
 	magneto_center_update(&online_center_estimator, raw_mag);
 	if (!magneto_centered_direction(&online_center_estimator, raw_mag, cur_dir)) {
 		return;
@@ -3044,7 +3221,7 @@ static bool sensor_calibration_online_mag_check(void)
 	int recent_sample_count_now = magneto_online_recent_sample_count();
 	int64_t now = k_uptime_get();
 
-	if (recent_sample_count_now < MAG_CAL_MIN_SAMPLES) {
+	if (recent_sample_count_now < ONLINE_MAG_CAL_MIN_SAMPLES) {
 		return false;
 	}
 	if (online_total_sample_count == online_last_checked_sample_count) {
@@ -3134,7 +3311,7 @@ static bool sensor_calibration_online_mag_check(void)
 	float recent_raw_range;
 	double recent_sample_count = magneto_online_collect_recent(ata_recent, &recent_norm_sum,
 	                                                           recent_dir_sum, &recent_raw_range);
-	if (recent_sample_count < MAG_CAL_MIN_SAMPLES) {
+	if (recent_sample_count < ONLINE_MAG_CAL_MIN_SAMPLES) {
 		return false;
 	}
 	if (recent_raw_range < MAG_CAL_MIN_RAW_AXIS_RANGE) {
@@ -3170,7 +3347,8 @@ static bool sensor_calibration_online_mag_check(void)
 
 	// Quality check: directional diversity + validation + compute calibration
 	float m_inv[4][3];
-	if (!magneto_quality_check(ata_recent, recent_norm_sum, recent_sample_count, m_inv)) {
+	if (!magneto_quality_check(ata_recent, recent_norm_sum, recent_sample_count,
+	                           ONLINE_MAG_CAL_MIN_SAMPLES, m_inv)) {
 		LOG_INF("Online mag cal: check failed (%d recent samples, dir_bias=%.3f)",
 		        (int)recent_sample_count, (double)dbias);
 		return false;
@@ -3279,11 +3457,8 @@ static bool sensor_calibration_online_mag_check(void)
 	return true;
 }
 
-int sensor_calibration_online_mag_status(float *dir_bias)
+int sensor_calibration_online_mag_status(void)
 {
-	if (dir_bias) {
-		*dir_bias = magneto_online_recent_dir_bias();
-	}
 	return magneto_online_recent_sample_count();
 }
 
@@ -3463,9 +3638,11 @@ static void calibration_thread(void)
 #endif
 
 		// Phase 2: Background online magnetometer calibration check
+#if IS_ENABLED(CONFIG_SENSOR_ONLINE_MAG_CAL)
 		if (requested == 0) {
 			sensor_calibration_online_mag_check();
 		}
+#endif
 
 		/* Feed watchdog at end of each loop iteration */
 		watchdog_feed(WDT_CHANNEL_CALIBRATION);

@@ -159,5 +159,6 @@ const sensor_mag_t sensor_mag_ak09940 = {
 	*ak_temp_read,
 
 	*ak_mag_process,
-	9, 9
+	9, 9,
+	0.5f
 };
