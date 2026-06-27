@@ -72,16 +72,22 @@ static uint16_t sens_cal_revolutions;
 #define CALIBRATION_SENSOR_INIT_WAIT_MS 10000
 #define CALIBRATION_SENSOR_INIT_POLL_MS 10
 
-// Minimum samples before attempting trial calibration
-#define MAG_CAL_MIN_SAMPLES 600
+// Minimum samples before attempting trial calibration.
+// Two separate thresholds: the manual path accumulates an unbounded lifetime
+// sample_count and needs a large value for a stable first fit; the online path
+// is bounded by the 8x16=128 quadrant ring buffer and uses a smaller value
+// (half-fill) so a trial fit becomes possible as the buffer fills.
+#define MAG_CAL_MIN_SAMPLES 600          // manual calibration
+#define ONLINE_MAG_CAL_MIN_SAMPLES 64    // online (background) calibration
 // Attempt trial calibration every this many new samples (manual cal)
 #define MAG_CAL_TRIAL_INTERVAL 80
 
 // Sensor-adaptive calibration parameters (manual calibration only).
-// Online calibration keeps the compile-time defaults above because it has
-// its own EMA blending mechanism that already suppresses noise influence.
-// These are initialised from sensor_mag->cal_noise_mg via
-// sensor_calibration_init_noise_params() once the magnetometer is detected.
+// The runtime variables below are initialised from sensor_mag->cal_noise_mg
+// via sensor_calibration_init_noise_params() once the magnetometer is detected.
+// The online path uses the compile-time ONLINE_MAG_CAL_MIN_SAMPLES directly
+// because its EMA blending mechanism already suppresses noise influence, and
+// its sample count is bounded by the quadrant ring buffer (max 128).
 static int mag_cal_min_samples = MAG_CAL_MIN_SAMPLES;
 static int mag_cal_trial_interval = MAG_CAL_TRIAL_INTERVAL;
 // Chunked-averaging target for manual calibration: N accepted samples are
@@ -195,7 +201,7 @@ static float manual_last_accel_dir[3];
 // Background checks should not run on every calibration-thread pass.
 // Tie the minimum check spacing to roughly one fresh fit's worth of accepted
 // samples at the maximum online sampling rate.
-#define ONLINE_MIN_CHECK_INTERVAL_MS (MAG_CAL_MIN_SAMPLES * ONLINE_MIN_INTERVAL_MS * 2)
+#define ONLINE_MIN_CHECK_INTERVAL_MS (ONLINE_MAG_CAL_MIN_SAMPLES * ONLINE_MIN_INTERVAL_MS * 2)
 
 // Runtime calibrated norm tracking (exponential moving average)
 // Used to assess current calibration quality and decide if online update is needed
@@ -2283,9 +2289,9 @@ static float magneto_min_dir_range(void)
  * Returns true if quality is acceptable.
  */
 static bool magneto_quality_check(double *ata_buf, double norm_sum_val, double sample_count_val,
-                                  float m_inv_out[][3])
+                                  int min_samples, float m_inv_out[][3])
 {
-	if (sample_count_val < MAG_CAL_MIN_SAMPLES) {
+	if (sample_count_val < min_samples) {
 		return false;
 	}
 
@@ -3032,7 +3038,7 @@ static void sensor_sample_mag_magneto_sample(const float m[3])
 			return;
 		}
 
-		if (magneto_quality_check(ata, norm_sum, sample_count, NULL)) {
+		if (magneto_quality_check(ata, norm_sum, sample_count, mag_cal_min_samples, NULL)) {
 			magneto_progress |= 0b01111111;
 			LOG_INF("Mag cal ready: %d samples, min_range=%.2f",
 			        (int)sample_count, (double)min_range);
@@ -3190,7 +3196,7 @@ static bool sensor_calibration_online_mag_check(void)
 	int recent_sample_count_now = magneto_online_recent_sample_count();
 	int64_t now = k_uptime_get();
 
-	if (recent_sample_count_now < MAG_CAL_MIN_SAMPLES) {
+	if (recent_sample_count_now < ONLINE_MAG_CAL_MIN_SAMPLES) {
 		return false;
 	}
 	if (online_total_sample_count == online_last_checked_sample_count) {
@@ -3280,7 +3286,7 @@ static bool sensor_calibration_online_mag_check(void)
 	float recent_raw_range;
 	double recent_sample_count = magneto_online_collect_recent(ata_recent, &recent_norm_sum,
 	                                                           recent_dir_sum, &recent_raw_range);
-	if (recent_sample_count < MAG_CAL_MIN_SAMPLES) {
+	if (recent_sample_count < ONLINE_MAG_CAL_MIN_SAMPLES) {
 		return false;
 	}
 	if (recent_raw_range < MAG_CAL_MIN_RAW_AXIS_RANGE) {
@@ -3316,7 +3322,8 @@ static bool sensor_calibration_online_mag_check(void)
 
 	// Quality check: directional diversity + validation + compute calibration
 	float m_inv[4][3];
-	if (!magneto_quality_check(ata_recent, recent_norm_sum, recent_sample_count, m_inv)) {
+	if (!magneto_quality_check(ata_recent, recent_norm_sum, recent_sample_count,
+	                           ONLINE_MAG_CAL_MIN_SAMPLES, m_inv)) {
 		LOG_INF("Online mag cal: check failed (%d recent samples, dir_bias=%.3f)",
 		        (int)recent_sample_count, (double)dbias);
 		return false;
